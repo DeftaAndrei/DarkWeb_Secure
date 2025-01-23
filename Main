@@ -1,0 +1,179 @@
+import os
+import time
+import subprocess
+import logging
+import re
+from cryptography.fernet import Fernet
+from stem.control import Controller
+import tkinter as tk
+from tkinter import Label, Button
+import requests
+
+# Configurare logare
+# Fişierul 'security.log' este utilizat pentru a stoca evenimentele importante.
+# Nivelul INFO capturează mesaje informative, iar nivelul ERROR capturează erorile care apar.
+logging.basicConfig(filename='security.log', level=logging.INFO, format='%(asctime)s - %(message)s')
+
+# Inițializare cheie criptare pentru date sensibile
+KEY = Fernet.generate_key()
+cipher_suite = Fernet(KEY)
+
+# Salvarea parolei Tor criptată într-un fișier securizat
+if not os.path.exists('tor_password.enc'):
+    tor_password = "your_tor_password"  # Înlocuiește cu parola reală
+    encrypted_password = cipher_suite.encrypt(tor_password.encode())
+    with open('tor_password.enc', 'wb') as file:
+        file.write(encrypted_password)
+
+# Funcție pentru citirea parolei Tor
+
+def get_tor_password():
+    try:
+        with open('tor_password.enc', 'rb') as file:
+            encrypted_password = file.read()
+        return cipher_suite.decrypt(encrypted_password).decode()
+    except Exception as e:
+        logging.error(f"[ERROR] Eroare la decriptarea parolei: {e}")
+        exit(1)
+
+# Funcție pentru validarea intrărilor
+
+def validate_input(input_str, pattern):
+    if not re.match(pattern, input_str):
+        raise ValueError(f"Invalid input: {input_str}")
+
+# Funcție pentru schimbarea circuitului Tor
+def change_tor_ip():
+    try:
+        with Controller.from_port(port=9051) as controller:
+            controller.authenticate(password=get_tor_password())
+            controller.signal('NEWNYM')
+            return True, "[INFO] IP-ul Tor a fost schimbat."
+    except Exception as e:
+        logging.error(f"[ERROR] Eroare la schimbarea IP-ului Tor: {e}")
+        return False, f"[ERROR] Eroare la schimbarea IP-ului Tor: {e}"
+
+# Funcție pentru a opri Java
+def disable_java():
+    try:
+        if os.name == 'nt':  # Windows
+            subprocess.run(["taskkill", "/F", "/IM", "java.exe"], check=True, timeout=10)
+        else:  # Linux/Mac
+            subprocess.run(["pkill", "-f", "java"], check=True, timeout=10)
+        return True, "[INFO] Java a fost oprit."
+    except subprocess.CalledProcessError as e:
+        logging.error(f"[ERROR] Eroare la oprirea Java: {e}")
+        return False, f"[ERROR] Eroare la oprirea Java: {e}"
+
+# Funcție pentru configurarea Tor ca proxy global
+def configure_tor_proxy():
+    try:
+        if os.name != 'nt':  # Linux/Mac
+            subprocess.run(["sudo", "iptables", "-F"], check=True, timeout=10)  # Șterge toate regulile anterioare
+            subprocess.run(["sudo", "iptables", "-t", "nat", "-A", "OUTPUT", "!", "-o", "lo", "-p", "tcp", "-m", "owner", "!", "--uid-owner", "debian-tor", "-j", "REDIRECT", "--to-ports", "9050"], check=True, timeout=10)
+            return True, "[INFO] Traficul a fost redirecționat prin Tor."
+        else:
+            return False, "[INFO] Configurarea proxy-ului Tor trebuie făcută manual pe Windows."
+    except subprocess.CalledProcessError as e:
+        logging.error(f"[ERROR] Eroare la configurarea proxy-ului Tor: {e}")
+        return False, f"[ERROR] Eroare la configurarea proxy-ului Tor: {e}"
+
+# Funcție pentru verificarea conexiunii prin Tor
+def verify_tor_connection():
+    try:
+        proxies = {"http": "socks5h://127.0.0.1:9050", "https": "socks5h://127.0.0.1:9050"}
+        response = requests.get("https://check.torproject.org", proxies=proxies, timeout=10)
+        if "Congratulations" in response.text:
+            return True, "[INFO] Conexiunea este securizată prin Tor."
+        else:
+            return False, "[WARNING] Conexiunea nu trece prin Tor."
+    except requests.RequestException as e:
+        logging.error(f"[ERROR] Eroare la verificarea conexiunii prin Tor: {e}")
+        return False, f"[ERROR] Eroare la verificarea conexiunii prin Tor: {e}"
+
+# Funcție pentru detectarea atacurilor
+def detect_attacks():
+    try:
+        logs = subprocess.check_output(["sudo", "iptables", "-L", "-v", "-n"], timeout=10).decode()
+        potential_attacks = [line for line in logs.splitlines() if "DROP" in line or "REJECT" in line]
+        if potential_attacks:
+            return False, "[WARNING] Activitate suspectă detectată în firewall!"
+        else:
+            return True, "[INFO] Nu au fost detectate atacuri."
+    except Exception as e:
+        logging.error(f"[ERROR] Eroare la detectarea atacurilor: {e}")
+        return False, f"[ERROR] Eroare la detectarea atacurilor: {e}"
+
+# Funcție pentru a configura SSH Tunneling
+def ssh_tunnel(host, user, key_path):
+    try:
+        validate_input(host, r"^[a-zA-Z0-9.-]+$")
+        validate_input(user, r"^[a-zA-Z0-9._-]+$")
+        command = ["ssh", "-i", key_path, "-D", "9050", f"{user}@{host}"]
+        subprocess.Popen(command)
+        return True, f"[INFO] SSH Tunneling activat către {host}."
+    except Exception as e:
+        logging.error(f"[ERROR] Eroare la configurarea SSH: {e}")
+        return False, f"[ERROR] Eroare la configurarea SSH: {e}"
+
+# Funcție pentru actualizarea GUI
+def update_gui(status_dict):
+    for key, (status, message) in status_dict.items():
+        if status:
+            labels[key].config(text=message, fg="green")
+        else:
+            labels[key].config(text=message, fg="red")
+
+# Bucla principală cu interfață grafică
+def main():
+    def run_checks():
+        status_dict = {}
+
+        status_dict['tor_ip'], msg = change_tor_ip()
+        logging.info(msg)
+
+        status_dict['java'], msg = disable_java()
+        logging.info(msg)
+
+        status_dict['tor_proxy'], msg = configure_tor_proxy()
+        logging.info(msg)
+
+        status_dict['tor_connection'], msg = verify_tor_connection()
+        logging.info(msg)
+
+        status_dict['ssh_tunnel'], msg = ssh_tunnel("example.com", "user", "/path/to/private/key")
+        logging.info(msg)
+
+        status_dict['attack_detection'], msg = detect_attacks()
+        logging.info(msg)
+
+        update_gui(status_dict)
+
+        root.after(30000, run_checks)  # Rulează din nou după 30 de secunde
+
+    global root, labels
+    root = tk.Tk()
+    root.title("Monitorizare Securitate")
+
+    labels = {
+        'tor_ip': Label(root, text="Schimbare IP Tor", font=("Arial", 12)),
+        'java': Label(root, text="Dezactivare Java", font=("Arial", 12)),
+        'tor_proxy': Label(root, text="Configurare Proxy Tor", font=("Arial", 12)),
+        'tor_connection': Label(root, text="Verificare Conexiune Tor", font=("Arial", 12)),
+        'ssh_tunnel': Label(root, text="Configurare Tunel SSH", font=("Arial", 12)),
+        'attack_detection': Label(root, text="Detectare Atacuri", font=("Arial", 12))
+    }
+
+    for label in labels.values():
+        label.pack(pady=5)
+
+    Button(root, text="Detalii Erori", command=lambda: logging.info("Detalii erori solicitate.")).pack()
+
+    run_checks()
+    root.mainloop()
+
+if __name__ == "__main__":
+    if os.geteuid() != 0:
+        print("[ERROR] Scriptul trebuie rulat cu privilegii de administrator.")
+        exit(1)
+    main()
